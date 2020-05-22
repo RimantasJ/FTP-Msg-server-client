@@ -39,17 +39,16 @@ void *read_func(void *value)
 
 	read(main_th_pipe[0], buff, LINESIZE);
 	sscanf(buff, "%d\n", &main_th_pipe[1]);
-	printf("R_th: %s\n", buff);
 
 	read(main_th_pipe[0], buff, LINESIZE);
 	sscanf(buff, "%d\n", &cmd_soc);
-	printf("R_th: %s\n", buff);
 
 	regcomp(&ret_code_regex, "^Server:[[:space:]][[:digit:]][[:digit:]][[:digit:]][[:space:]]", 0);
 	regcomp(&quit_regex, "^Server:[[:space:]]221[[:space:]]", 0); // 221 is code for server closing command connection
 
 	while (regexec(&quit_regex, buff, 0, NULL, 0) != 0)
 	{
+		printf("read thread loop\n");
 		if (recv(cmd_soc, buff, sizeof(buff), 0) <= 0)
 		{
 			perror("Error reading form server!");
@@ -82,17 +81,16 @@ void *write_func(void *value)
 
 	read(main_th_pipe[0], buff, LINESIZE);
 	sscanf(buff, "%d\n", &main_th_pipe[1]);
-	printf("W_th: %s\n", buff);
 
 	read(main_th_pipe[0], buff, LINESIZE);
 	sscanf(buff, "%d\n", &cmd_soc);
-	printf("W_th: %s\n", buff);
 
 	regcomp(&cmd_code_regex, "^[[:upper:]][[:upper:]][[:upper:]][[:upper:]][[:space:]]", 0);
 	regcomp(&quit_regex, "^QUIT", 0);
 
 	while (regexec(&quit_regex, buff, 0, NULL, 0) != 0)
 	{
+		printf("read thread loop\n");
 		fgets(buff, sizeof(buff), stdin);
 		int len = strlen(buff);
 		buff[len - 1] = '\0';
@@ -102,7 +100,6 @@ void *write_func(void *value)
 			break;
 		}
 
-		printf("buff: %s\n", buff);
 		if (regexec(&cmd_code_regex, buff, 0, NULL, 0) == 0)
 		{
 			printf("Command found!\n");
@@ -146,6 +143,7 @@ void *data_func(void *value)
 
 	while (strcmp(cmd_code, "QUIT") != 0)
 	{
+		printf("read thread loop\n");
 		read(main_th_pipe[0], cmd_code, LINESIZE);
 		read(main_th_pipe[0], file_name, LINESIZE);
 
@@ -242,12 +240,12 @@ int get_ip_and_port(char* mess, char* ip, int* port)
 // Takes IP and PORT from stdin for command soc
 int get_ip_and_port_from_stdin(char* ip, int* port)
 {
-	char buff[16];
+	char buff[LINESIZE];
 
 	printf("IP: ");
-	fgets(ip, 32, stdin);
+	fgets(ip, LINESIZE, stdin);
 	printf("Port: ");
-	fgets(buff, 16, stdin);
+	fgets(buff, LINESIZE, stdin);
 	sscanf(buff, "%d", port);
 
 	return 0;
@@ -319,14 +317,12 @@ int main()
 	char *cmd_mess = malloc(LINESIZE);
 	char *ret_mess = malloc(LINESIZE);
 	char *buff = malloc(LINESIZE);
-	char *cmd_code = malloc(16);	/* ([A-Z][A-Z][A-Z][A-Z]\s) */
-	int ret_code;					/* (\d{3}) */
-	char *ip = malloc(32);			/* (\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}) */
-	int port;						/* (\d{4,5}) */
-
-	//int fd;
+	char *cmd_code = malloc(LINESIZE); 	/* ([A-Z][A-Z][A-Z][A-Z]\s) */
+	int ret_code;						/* (\d{3}) */
+	char *ip = malloc(LINESIZE);		/* (\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}) */
+	int port;							/* (\d{4,5}) */
 	int err_code;
-	//int quit = 0;//!!!!!!!!!!!!!!!!!!!!!!!!!!
+	int pasv_mode; // 1 - passive mode is enabled
 
 	print_info();
 
@@ -408,7 +404,7 @@ int main()
 	sprintf(buff, "%d", cmd_soc);
 	write(w_write_th_pipe[1], buff, LINESIZE);
 
-		/* Creating the data thread with one pipe
+	/* Creating the data thread with one pipe
 	w_data_th_pipe is used to send instruction to the data thread about file transfering
 	*/
 	err_code = pipe(w_data_th_pipe);
@@ -422,7 +418,7 @@ int main()
 		return 0;
 	}
 
-	pthread_create(&write_th, NULL, write_func, &w_data_th_pipe[0]);
+	pthread_create(&data_th, NULL, write_func, &w_data_th_pipe[0]);
 
 	struct pollfd *pfds = malloc(sizeof *pfds * 3);
 
@@ -451,75 +447,66 @@ int main()
 			switch (ret_code)
 			{
 			case 125:
-			// Transfer strarting
+				// Transfer strarting
 				get_1st_word(cmd_mess, cmd_code);
+				// file name in buff
 				get_2nd_word(cmd_mess, buff);
 
 				write(w_data_th_pipe[1], cmd_code, LINESIZE);
 				write(w_data_th_pipe[1], buff, LINESIZE);
-
 				break;
+
 			case 221:
-			// Closing control connection
-			write(w_data_th_pipe[1], "QUIT", LINESIZE);
-			break;
+				// Closing control connection
+				write(w_data_th_pipe[1], "QUIT", LINESIZE);
+				break;
 
 			case 226:
-			// File transfer successful
+				// File transfer successful
 				break;
 
 			case 227:
-			// Entering passive mode (h1,h2,h3,h4,p1,p2)
-			#pragma region 227
-				get_ip_and_port(ret_mess, ip, &port);
-				connect_data_socket(&data_soc, ip, port);
-				if (cmd_soc > 0)
+				// Entering passive mode (h1,h2,h3,h4,p1,p2)
+				
+				if (pasv_mode == 1)
 				{
-					printf("Data socket connected!\n");
+					printf("System: mode already set to passive\n");
 				}
-				else
-				{
-					printf("Data socket connection failed. Exiting\n");
-					strncpy(cmd_mess, "QUIT", 32);
-					if (send(cmd_soc, cmd_mess, LINESIZE, 0) == -1)
-					{
-						perror("Nutruko rysys su serveriu\n");
-						break;
-					}
-					close(cmd_soc);
-					free(ip);
-					free(buff);
-					free(ret_mess);
-					free(cmd_mess);
-					return 0;
+				else {
+					printf("System: establishing data connection\n");
+					pasv_mode = 1;
+					get_ip_and_port(ret_mess, ip, &port);
+					write(w_data_th_pipe[1], ip, LINESIZE);
+					sprintf(buff, "%d", port);
+					write(w_data_th_pipe[1], buff, LINESIZE);
 				}
 				break;
-			#pragma endregion
+
 			case 230:
-			// User logged in
+				// User logged in
 				break;
 
 			case 250:
-			// File list
+				// File list
 				break;
 
 			case 400:
-			// Mode not selected
+				// Mode not selected
 				printf("Use PASV to select passive mode\n");
 				break;
 
 			case 500:
-			// Unknown command
+				// Unknown command
 				printf("Please refer to implemented commands");
 				break;
 
 			case 530:
-			// Not logged in
+				// Not logged in
 				printf("Log in with USER <username> before managing data\n");
 				break;
 
 			case 550:
-			// File not found
+				// File not found
 				printf("Use LIST to see your files in server\n");
 				break;
 
